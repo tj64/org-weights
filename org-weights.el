@@ -65,8 +65,11 @@
       (outline-next-visible-heading 1)
       (while (not (eobp))
         (save-excursion
-          (org-weights-set-overlay (org-weights-at-point)
-                                     (funcall outline-level)))
+          (org-weights-set-overlay
+           (if (eq major-mode 'org-mode)
+               (org-weights-at-point)
+             (org-weights-at-point-for-outline))
+           (funcall outline-level)))
         (outline-next-visible-heading 1))
       (add-hook 'after-change-functions 'org-weights-after-change
                 nil 'local)
@@ -88,12 +91,18 @@
             (while (and (outline-back-to-heading)
                         (or force (>= (point) begin)))
               (unless (= (point) bol)
-                (org-weights-set-overlay (org-weights-at-point)
-                                           (funcall outline-level)))
+                (org-weights-set-overlay 
+                 (if (eq major-mode 'org-mode)
+                     (org-weights-at-point)
+                   (org-weights-at-point-for-outline))
+                 (funcall outline-level)))
               (save-excursion
                 (while (outline-up-heading 1)
-                  (org-weights-set-overlay (org-weights-at-point)
-                                             (funcall outline-level))))
+                  (org-weights-set-overlay
+                   (if (eq major-mode 'org-mode)
+                       (org-weights-at-point)
+                     (org-weights-at-point-for-outline))
+                   (funcall outline-level))))
               (setq force nil))
           (error nil))))))
 
@@ -121,8 +130,11 @@ Also, if the line changed, recompute the overlay for saved point."
             (when buffer
               (set-buffer buffer)
               (goto-char org-weights-saved-start)
-              (org-weights-set-overlay (org-weights-at-point)
-                                         (funcall outline-level)))))))))
+              (org-weights-set-overlay
+               (if (eq major-mode 'org-mode)
+                   (org-weights-at-point)
+                 (org-weights-at-point-for-outline))
+               (funcall outline-level)))))))))
 
 ;;;; Routines
 
@@ -134,7 +146,9 @@ Prefix weights with LEVEL number of stars."
         (headers (car weights))
         (paragraphs (cdr weights))
         filler overlay)
-    (org-move-to-column org-weights-overlay-column)
+    (if (eq major-mode 'org-mode)
+        (org-move-to-column org-weights-overlay-column)
+      (move-to-column org-weights-overlay-column))
     (unless (eolp) (skip-chars-backward "^ \t"))
     (skip-chars-backward " \t")
     (let ((overlays org-weights-overlays))
@@ -148,14 +162,17 @@ Prefix weights with LEVEL number of stars."
       (setq overlay (make-overlay (1- (point)) (point-at-eol))))
     (setq filler (max 0 (- org-weights-overlay-column
                            (current-column) 2)))
-    (let ((text (concat
-                 (buffer-substring (1- (point)) (point))
-                 (make-string (+ 2 filler) ? )
-                 (org-add-props
-                     (format "%s %3s%s" level-string paragraphs
-                             (if (zerop headers) ""
-                               (format " + %s" headers)))
-                     (list 'face 'org-weights-face)))))
+    (let* ((strg (format "%s %3s%s" level-string paragraphs
+                         (if (zerop headers) ""
+                           (format " + %s" headers))))
+           (lst (list 'face 'org-weights-face))
+           (text (concat
+                  (buffer-substring (1- (point)) (point))
+                  (make-string (+ 2 filler) ? )
+                  (if (eq major-mode 'org-mode)
+                      (org-add-props strg lst)
+                    (add-text-properties 0 (length strg) lst strg)
+                    strg))))
       (if (not (featurep 'xemacs))
           (overlay-put overlay 'display text)
         (overlay-put overlay 'invisible t)
@@ -165,7 +182,9 @@ Prefix weights with LEVEL number of stars."
 (defun org-weights-unset-overlay ()
   "Remove an overlay from the current line, so it gets edited more easily."
   (let (overlay)
-    (org-move-to-column org-weights-overlay-column)
+    (if (eq major-mode 'org-mode)
+        (org-move-to-column org-weights-overlay-column)
+      (move-to-column org-weights-overlay-column))
     (unless (eolp) (skip-chars-backward "^ \t"))
     (skip-chars-backward " \t")
     (let ((overlays org-weights-overlays))
@@ -190,3 +209,32 @@ Paragraphs (also encompasses equivalent structures)."
       tree '(paragraph table verse-block quote-block src-block example-block)
       (lambda (el) (incf num-el)))
      (cons (1- num-hl) num-el))))
+
+(defun org-weights-at-point-for-outline ()
+  "Return cons of number of subtrees and paragraphs in the subtree at point.
+Paragraphs (also encompasses equivalent structures)."
+  (save-excursion
+    (save-restriction
+      (widen)
+      (outline-mark-subtree)
+      (and
+       (use-region-p)
+       (narrow-to-region (region-beginning) (region-end)))
+      (let ((subtrees 0)
+            (paragraphs 0)
+            (last-line-empty nil))
+        (outline-back-to-heading 'INVISIBLE-OK)
+        (forward-line)
+        (while (not (eobp))
+          (cond
+           ((outline-on-heading-p)
+            (setq subtrees (1+ subtrees)))
+           ((and (looking-at "^[[:space:]]*$")
+                 (not last-line-empty))
+            (setq paragraphs (1+ paragraphs)
+                  last-line-empty t))
+           ((not (looking-at "^[[:space:]]*$"))
+            (setq last-line-empty nil))
+           (t nil))
+          (forward-line))
+        (cons subtrees paragraphs)))))
