@@ -3,6 +3,7 @@
 ;; Copyright © 2013 Progiciels Bourbeau-Pinard inc.
 
 ;; Author: François Pinard <pinard@iro.umontreal.ca>
+;; Co-Author: Thorsten Jolitz <tjolitz AT gmail DOT com>
 ;; Maintainer: François Pinard <pinard@iro.umontreal.ca>
 ;; URL: https://github.com/pinard/org-weights
 
@@ -30,6 +31,48 @@
 
 ;;; Code:
 
+(defvar org-weights-heading-regexp ""
+    "Regexp used to find position behind headline text.")
+(make-variable-buffer-local 'org-weights-heading-regexp)
+
+(defvar org-weights-display-weights-p t
+  "If set to nil, hidden-lines-cookies instead of weights are shown.")
+
+(defvar org-weights-hidden-lines-cookies-on-p nil
+  "If non-nil, hidden-lines cookies are shown, otherwise hidden.")
+
+(defgroup org-weights nil
+  "hidden-line-cookies for Org-mode."
+  :prefix "org-weights-"
+  :group 'org)
+
+(defcustom org-weights-hidden-lines-cookie-left-delimiter "["
+  "Left delimiter of cookie that shows number of hidden lines."
+  :group 'org-weights
+  :type 'string)
+
+(defcustom org-weights-hidden-lines-cookie-right-delimiter "]"
+  "Left delimiter of cookie that shows number of hidden lines."
+  :group 'org-weights
+  :type 'string)
+
+(defcustom org-weights-hidden-lines-cookie-left-signal-char "#"
+  "Left signal character of cookie that shows number of hidden lines."
+  :group 'org-weights
+  :type 'string)
+
+(defcustom org-weights-hidden-lines-cookie-right-signal-char ""
+  "Right signal character of cookie that shows number of hidden lines."
+  :group 'org-weights
+  :type 'string)
+
+;; original value was 75
+(defcustom org-weights-overlay-column 65
+  ;; Should be high enough for tags to stay visible.
+  "Column where the weight overlay should be displayed."
+  :group 'org-weights
+  :type 'integer)
+
 (defface org-weights-face
   '((((class color) (background light))
      (:foreground "chocolate2" :weight bold))
@@ -37,9 +80,6 @@
      (:foreground "chocolate1" :weight bold)))
   "Face for weights information higlights.")
 
-(defconst org-weights-overlay-column 75
-  ;; Should be high enough for tags to stay visible.
-  "Column where the weight overlay should be displayed.")
 
 (defvar org-weights-overlays nil
   "Running list of currently displayed overlays.")
@@ -60,6 +100,7 @@
   (remove-hook 'post-command-hook
                'org-weights-post-command 'local)
   (when org-weights-mode
+    (org-weights-calc-heading-regexp)
     (save-excursion
       (goto-char (point-min))
       (outline-next-visible-heading 1)
@@ -67,9 +108,10 @@
         (save-excursion
           (org-weights-set-overlay
            (if (eq major-mode 'org-mode)
-               (org-weights-at-point)
+               (org-weights-at-point-for-org-mode)
              (org-weights-at-point-for-outline))
-           (funcall outline-level)))
+           (funcall outline-level)
+           (org-weights-body-lines)))
         (outline-next-visible-heading 1))
       (add-hook 'after-change-functions 'org-weights-after-change
                 nil 'local)
@@ -93,16 +135,18 @@
               (unless (= (point) bol)
                 (org-weights-set-overlay 
                  (if (eq major-mode 'org-mode)
-                     (org-weights-at-point)
+                     (org-weights-at-point-for-org-mode)
                    (org-weights-at-point-for-outline))
-                 (funcall outline-level)))
+                 (funcall outline-level)
+                 (org-weights-body-lines)))
               (save-excursion
                 (while (outline-up-heading 1)
                   (org-weights-set-overlay
                    (if (eq major-mode 'org-mode)
-                       (org-weights-at-point)
+                       (org-weights-at-point-for-org-mode)
                      (org-weights-at-point-for-outline))
-                   (funcall outline-level))))
+                   (funcall outline-level)
+                   (org-weights-body-lines))))
               (setq force nil))
           (error nil))))))
 
@@ -132,13 +176,14 @@ Also, if the line changed, recompute the overlay for saved point."
               (goto-char org-weights-saved-start)
               (org-weights-set-overlay
                (if (eq major-mode 'org-mode)
-                   (org-weights-at-point)
+                   (org-weights-at-point-for-org-mode)
                  (org-weights-at-point-for-outline))
-               (funcall outline-level)))))))))
+               (funcall outline-level)
+               (org-weights-body-lines)))))))))
 
 ;;;; Routines
 
-(defun org-weights-set-overlay (weights level)
+(defun org-weights-set-overlay (weights level body-lines)
   "Put an overlays on the current line, displaying WEIGHTS.
 Prefix weights with LEVEL number of stars."
   (let ((level-string
@@ -146,9 +191,7 @@ Prefix weights with LEVEL number of stars."
         (headers (car weights))
         (paragraphs (cdr weights))
         filler overlay)
-    (if (eq major-mode 'org-mode)
-        (org-move-to-column org-weights-overlay-column)
-      (move-to-column org-weights-overlay-column))
+    (org-weights-goto-overlay-start-position)
     (unless (eolp) (skip-chars-backward "^ \t"))
     (skip-chars-backward " \t")
     (let ((overlays org-weights-overlays))
@@ -160,11 +203,13 @@ Prefix weights with LEVEL number of stars."
                     overlays nil)))))
     (unless overlay
       (setq overlay (make-overlay (1- (point)) (point-at-eol))))
-    (setq filler (max 0 (- org-weights-overlay-column
+    (if org-weights-display-weights-p
+        (setq filler (max 0 (- org-weights-overlay-column
                            (current-column) 2)))
-    (let* ((strg (format "%s %3s%s" level-string paragraphs
-                         (if (zerop headers) ""
-                           (format " + %s" headers))))
+      (setq filler 1))
+    (let* ((strg
+            (org-weights-calc-overlay-string
+             level-string paragraphs headers body-lines))
            (lst (list 'face 'org-weights-face))
            (text (concat
                   (buffer-substring (1- (point)) (point))
@@ -182,9 +227,7 @@ Prefix weights with LEVEL number of stars."
 (defun org-weights-unset-overlay ()
   "Remove an overlay from the current line, so it gets edited more easily."
   (let (overlay)
-    (if (eq major-mode 'org-mode)
-        (org-move-to-column org-weights-overlay-column)
-      (move-to-column org-weights-overlay-column))
+    (org-weights-goto-overlay-start-position)
     (unless (eolp) (skip-chars-backward "^ \t"))
     (skip-chars-backward " \t")
     (let ((overlays org-weights-overlays))
@@ -198,11 +241,11 @@ Prefix weights with LEVEL number of stars."
       (delete-overlay overlay))))
 
 ;; Compliment of Nicolas Goaziou <n.goaziou@gmail.com>, 2012-02-26
-(defun org-weights-at-point ()
+(defun org-weights-at-point-for-org-mode()
   "Return cons of number of subtrees and paragraphs in the subtree at point.
 Paragraphs (also encompasses equivalent structures)."
   (org-with-wide-buffer
-   (org-narrow-to-subtree)
+   (org-weights-narrow-to-subtree)
    (let ((tree (org-element-parse-buffer 'element)) (num-hl 0) (num-el 0))
      (org-element-map tree 'headline (lambda (hl) (incf num-hl)))
      (org-element-map
@@ -216,25 +259,108 @@ Paragraphs (also encompasses equivalent structures)."
   (save-excursion
     (save-restriction
       (widen)
+      (org-weights-narrow-to-subtree)
+      (let ((subtrees 0)
+            (paragraphs 0)
+            (last-line-empty nil))
+        (goto-char (point-min))
+        (forward-line)
+        (while (not (eobp))
+          (forward-paragraph)
+          (setq paragraphs (1+ paragraphs)))
+        (while (not (bobp))
+          (outline-previous-heading)
+          (setq subtrees (1+ subtrees)))
+        ;; FIXME: 1 paragraph too much shown for last subtree in hierarchy?
+        ;; FIXME: consecutive subtrees without body are seen as one
+        ;; singe paragraph and thus mess up paragraph calculation
+        (cons (1- subtrees) (1+ (- paragraphs subtrees)))))))
+
+(defun org-weights-or-cookies ()
+  "Toggles between displaying subtree weights or hidden-lines-cookies."
+  (interactive)
+  (if org-weights-display-weights-p
+      (progn
+        (setq org-weights-display-weights-p nil)
+        (message "Displaying hidden-lines-cookies"))
+    (setq org-weights-display-weights-p t)
+    (message "Displaying subtree weights"))
+  (and org-weights-mode (org-weights-mode) (org-weights-mode)))
+
+(defun org-weights-body-lines ()
+  "Return number of lines till next visible headline."
+  (let* ((line-num-current-header (line-number-at-pos))
+         (line-num-next-visible-header
+          (save-excursion
+            (outline-next-visible-heading 1)
+            (line-number-at-pos))))
+    (1- (- line-num-next-visible-header line-num-current-header))))
+
+(defun org-weights-narrow-to-subtree ()
+  "Dispatcher calling narrowing functions conditional on major-mode."
+  (if (eq major-mode 'org-mode)
+      (org-narrow-to-subtree)
+    (progn
       (outline-mark-subtree)
       (and
        (use-region-p)
        (narrow-to-region (region-beginning) (region-end)))
-      (let ((subtrees 0)
-            (paragraphs 0)
-            (last-line-empty nil))
-        (outline-back-to-heading 'INVISIBLE-OK)
-        (forward-line)
-        (while (not (eobp))
-          (cond
-           ((outline-on-heading-p)
-            (setq subtrees (1+ subtrees)))
-           ((and (looking-at "^[[:space:]]*$")
-                 (not last-line-empty))
-            (setq paragraphs (1+ paragraphs)
-                  last-line-empty t))
-           ((not (looking-at "^[[:space:]]*$"))
-            (setq last-line-empty nil))
-           (t nil))
-          (forward-line))
-        (cons subtrees paragraphs)))))
+      (deactivate-mark))))
+
+(defun org-weights-calc-overlay-string
+  (level-string paragraphs headers body-lines)
+  "Calculate string to be displayed in overlay."
+  (if org-weights-display-weights-p
+      (format "%s %3s%s" level-string paragraphs
+              (if (zerop headers) ""
+                (format " + %s" headers)))
+    (format
+     " %s%s%s%s%s"
+     org-weights-hidden-lines-cookie-left-delimiter
+     org-weights-hidden-lines-cookie-left-signal-char
+     body-lines
+     org-weights-hidden-lines-cookie-right-signal-char
+     org-weights-hidden-lines-cookie-right-delimiter)))
+
+
+(defun org-weights-calc-heading-regexp ()
+  "Calculate `org-weights-heading-regexp'."
+  (setq org-weights-heading-regexp
+        (concat
+         ;; 1st group: outline-regexp
+         "^\\("
+         (if (eq major-mode 'org-mode)
+             "\\*+ "
+           outline-regexp)
+         "\\)"
+
+         ;; ;; FIXME does not match
+         ;; ;; 2nd group: trimmed body
+         ;; "\\(?: +\\(.*?\\)\\)?[ 	]*$"
+
+         ;; ;; FIXME 
+         ;; ;; 2nd group: headline text
+         ;; "\\([^\s\t]+\\)"
+
+         ;; 2nd group: headline text
+         "\\([])(\\[.,;:\"'[:word:]+[:digit:]-]+[ \\t]?\\)+"
+
+         ;; ;; 3rd group: rest till eol
+         ;; "\\(.*$\\)"
+         )))
+
+(defun org-weights-goto-overlay-start-position ()
+  "Move to postion where overlay should start."
+    (cond
+     ((and org-weights-display-weights-p
+           (eq major-mode 'org-mode))
+        (org-move-to-column org-weights-overlay-column))
+     ((and org-weights-display-weights-p
+           (not (eq major-mode 'org-mode)))
+      (move-to-column org-weights-overlay-column))
+     ((not org-weights-display-weights-p)
+      (re-search-forward
+       org-weights-heading-regexp
+       (line-end-position)
+       'NOERROR)
+      (goto-char (match-end 2)))))
