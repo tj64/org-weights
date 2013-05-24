@@ -42,7 +42,7 @@
   "If non-nil, hidden-lines cookies are shown, otherwise hidden.")
 
 (defgroup org-weights nil
-  "hidden-line-cookies for Org-mode."
+  "Subtree weights and hidden-line-cookies for Org-mode and Outshine."
   :prefix "org-weights-"
   :group 'org)
 
